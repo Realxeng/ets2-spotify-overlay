@@ -1,8 +1,9 @@
 using System;
 using System.Drawing;
 using System.Linq;
-using System.Net;
+using System.Net.Http;
 using System.Threading.Tasks;
+using Newtonsoft.Json.Linq;
 using SpotifyAPI.Web;
 using SpotifyAPI.Web.Auth;
 using SpotifyAPI.Web.Enums;
@@ -25,8 +26,13 @@ namespace ETS2_Spotify_Overlay
 
         private PlaybackContext _playback;
         private string _currentTrackId;
+        private string _cachedLyricsTrackId;
+        private string _cachedSyncedLyrics = "";
+        private readonly object _lyricsLock = new object();
         private bool _authorized = false;
         private bool _isUpdating = false;
+        private static readonly HttpClient _httpClient = new HttpClient { Timeout = TimeSpan.FromSeconds(5) };
+        private const string LyricsApiUrl = "https://lrclib.net/api/get?track_name={0}&artist_name={1}";
 
         public event EventHandler<TrackInfo> TrackChanged;
         public event EventHandler<string> StatusChanged;
@@ -40,6 +46,7 @@ namespace ETS2_Spotify_Overlay
             public bool IsPlaying { get; set; }
             public int ProgressMs { get; set; }
             public int DurationMs { get; set; }
+            public string SyncedLyrics { get; set; }
         }
 
         public bool IsConnected => _authorized && _spotify != null;
@@ -147,7 +154,8 @@ namespace ETS2_Spotify_Overlay
                         : null,
                     IsPlaying = _playback.IsPlaying,
                     ProgressMs = _playback.ProgressMs,
-                    DurationMs = _playback.Item.DurationMs
+                    DurationMs = _playback.Item.DurationMs,
+                    SyncedLyrics = GetCachedSyncedLyrics(_playback.Item.Uri)
                 };
 
                 // Check if track changed
@@ -167,7 +175,8 @@ namespace ETS2_Spotify_Overlay
                                 AlbumCoverUrl = trackInfo.AlbumCoverUrl,
                                 IsPlaying = trackInfo.IsPlaying,
                                 ProgressMs = trackInfo.ProgressMs + (fakeSeconds * 1000),
-                                DurationMs = trackInfo.DurationMs
+                                DurationMs = trackInfo.DurationMs,
+                                SyncedLyrics = trackInfo.SyncedLyrics
                             };
                             TrackChanged?.Invoke(this, progressInfo);
                             await Task.Delay(1000);
@@ -181,6 +190,9 @@ namespace ETS2_Spotify_Overlay
 
                 // Track changed
                 _currentTrackId = _playback.Item.Uri;
+                string primaryArtist = _playback.Item.Artists.FirstOrDefault()?.Name ?? trackInfo.Artists;
+                await FetchAndCacheSyncedLyricsAsync(_currentTrackId, trackInfo.TrackName, primaryArtist);
+                trackInfo.SyncedLyrics = GetCachedSyncedLyrics(_currentTrackId);
                 TrackChanged?.Invoke(this, trackInfo);
 
                 await Task.Delay(1000);
@@ -199,6 +211,11 @@ namespace ETS2_Spotify_Overlay
             _isUpdating = false;
             _authorized = false;
             _spotify = null;
+            lock (_lyricsLock)
+            {
+                _cachedLyricsTrackId = null;
+                _cachedSyncedLyrics = "";
+            }
             OnStatusChanged("Disconnected");
         }
 
@@ -217,8 +234,101 @@ namespace ETS2_Spotify_Overlay
                     : null,
                 IsPlaying = _playback.IsPlaying,
                 ProgressMs = _playback.ProgressMs,
-                DurationMs = _playback.Item.DurationMs
+                DurationMs = _playback.Item.DurationMs,
+                SyncedLyrics = GetCachedSyncedLyrics(_playback.Item.Uri)
             };
+        }
+
+        private string GetCachedSyncedLyrics(string trackId)
+        {
+            if (string.IsNullOrWhiteSpace(trackId))
+                return "";
+
+            lock (_lyricsLock)
+            {
+                return _cachedLyricsTrackId == trackId ? (_cachedSyncedLyrics ?? "") : "";
+            }
+        }
+
+        private async Task FetchAndCacheSyncedLyricsAsync(string trackId, string trackName, string artistName)
+        {
+            if (string.IsNullOrWhiteSpace(trackId) || string.IsNullOrWhiteSpace(trackName) || string.IsNullOrWhiteSpace(artistName))
+            {
+                lock (_lyricsLock)
+                {
+                    _cachedLyricsTrackId = trackId;
+                    _cachedSyncedLyrics = "";
+                }
+                return;
+            }
+
+            lock (_lyricsLock)
+            {
+                if (_cachedLyricsTrackId == trackId)
+                    return;
+            }
+
+            string syncedLyrics = "";
+            try
+            {
+                string normalizedTrack = NormalizeForLyricsLookup(trackName);
+                string normalizedArtist = NormalizeForLyricsLookup(artistName);
+                string url = string.Format(
+                    LyricsApiUrl,
+                    Uri.EscapeDataString(normalizedTrack),
+                    Uri.EscapeDataString(normalizedArtist)
+                );
+                string response = await GetStringWithRetryAsync(url, 2);
+                var json = JObject.Parse(response);
+                syncedLyrics = json["syncedLyrics"]?.ToString() ?? "";
+            }
+            catch (Exception ex)
+            {
+                Log.Write("Lyrics fetch error: " + ex.Message);
+                syncedLyrics = "";
+            }
+
+            lock (_lyricsLock)
+            {
+                _cachedLyricsTrackId = trackId;
+                _cachedSyncedLyrics = syncedLyrics;
+            }
+        }
+
+        private async Task<string> GetStringWithRetryAsync(string url, int attempts)
+        {
+            Exception lastError = null;
+            for (int i = 0; i < attempts; i++)
+            {
+                try
+                {
+                    return await _httpClient.GetStringAsync(url);
+                }
+                catch (Exception ex)
+                {
+                    lastError = ex;
+                    if (i < attempts - 1)
+                    {
+                        await Task.Delay(300);
+                    }
+                }
+            }
+
+            throw lastError ?? new Exception("Failed to fetch lyrics.");
+        }
+
+        private string NormalizeForLyricsLookup(string text)
+        {
+            if (string.IsNullOrWhiteSpace(text))
+                return "";
+
+            string normalized = text;
+            int bracketIndex = normalized.IndexOf('(');
+            if (bracketIndex > 0)
+            {
+                normalized = normalized.Substring(0, bracketIndex);
+            }
+            return normalized.Trim();
         }
 
         private void OnStatusChanged(string status)
