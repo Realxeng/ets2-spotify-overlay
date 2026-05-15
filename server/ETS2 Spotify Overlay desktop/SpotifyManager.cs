@@ -1,7 +1,7 @@
 using System;
 using System.Drawing;
 using System.Linq;
-using System.Net;
+using System.Net.Http;
 using System.Threading.Tasks;
 using Newtonsoft.Json.Linq;
 using SpotifyAPI.Web;
@@ -31,6 +31,7 @@ namespace ETS2_Spotify_Overlay
         private readonly object _lyricsLock = new object();
         private bool _authorized = false;
         private bool _isUpdating = false;
+        private static readonly HttpClient _httpClient = new HttpClient { Timeout = TimeSpan.FromSeconds(5) };
         private const string LyricsApiUrl = "https://lrclib.net/api/get?track_name={0}&artist_name={1}";
 
         public event EventHandler<TrackInfo> TrackChanged;
@@ -189,7 +190,8 @@ namespace ETS2_Spotify_Overlay
 
                 // Track changed
                 _currentTrackId = _playback.Item.Uri;
-                FetchAndCacheSyncedLyrics(_currentTrackId, trackInfo.TrackName, trackInfo.Artists);
+                string primaryArtist = _playback.Item.Artists.FirstOrDefault()?.Name ?? trackInfo.Artists;
+                await FetchAndCacheSyncedLyricsAsync(_currentTrackId, trackInfo.TrackName, primaryArtist);
                 trackInfo.SyncedLyrics = GetCachedSyncedLyrics(_currentTrackId);
                 TrackChanged?.Invoke(this, trackInfo);
 
@@ -248,9 +250,9 @@ namespace ETS2_Spotify_Overlay
             }
         }
 
-        private void FetchAndCacheSyncedLyrics(string trackId, string trackName, string artists)
+        private async Task FetchAndCacheSyncedLyricsAsync(string trackId, string trackName, string artistName)
         {
-            if (string.IsNullOrWhiteSpace(trackId) || string.IsNullOrWhiteSpace(trackName) || string.IsNullOrWhiteSpace(artists))
+            if (string.IsNullOrWhiteSpace(trackId) || string.IsNullOrWhiteSpace(trackName) || string.IsNullOrWhiteSpace(artistName))
             {
                 lock (_lyricsLock)
                 {
@@ -269,22 +271,18 @@ namespace ETS2_Spotify_Overlay
             string syncedLyrics = "";
             try
             {
-                using (var client = new WebClient())
-                {
-                    client.Headers.Add(HttpRequestHeader.UserAgent, "ETS2-Spotify-Overlay");
-                    string primaryArtist = artists.Split(new[] { " - " }, StringSplitOptions.RemoveEmptyEntries).FirstOrDefault() ?? artists;
-                    string url = string.Format(
-                        LyricsApiUrl,
-                        Uri.EscapeDataString(trackName),
-                        Uri.EscapeDataString(primaryArtist)
-                    );
-                    string response = client.DownloadString(url);
-                    var json = JObject.Parse(response);
-                    syncedLyrics = json["syncedLyrics"]?.ToString() ?? "";
-                }
+                string url = string.Format(
+                    LyricsApiUrl,
+                    Uri.EscapeDataString(trackName),
+                    Uri.EscapeDataString(artistName)
+                );
+                string response = await _httpClient.GetStringAsync(url);
+                var json = JObject.Parse(response);
+                syncedLyrics = json["syncedLyrics"]?.ToString() ?? "";
             }
-            catch
+            catch (Exception ex)
             {
+                Log.Write("Lyrics fetch error: " + ex.Message);
                 syncedLyrics = "";
             }
 
