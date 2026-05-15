@@ -182,7 +182,8 @@ namespace ETS2_Spotify_Overlay
                         coverUrl = track.AlbumCoverUrl,
                         isPlaying = track.IsPlaying,
                         progressMs = track.ProgressMs,
-                        durationMs = track.DurationMs
+                        durationMs = track.DurationMs,
+                        syncedLyrics = track.SyncedLyrics
                     });
                 }
                 else
