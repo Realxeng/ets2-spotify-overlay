@@ -271,12 +271,14 @@ namespace ETS2_Spotify_Overlay
             string syncedLyrics = "";
             try
             {
+                string normalizedTrack = NormalizeForLyricsLookup(trackName);
+                string normalizedArtist = NormalizeForLyricsLookup(artistName);
                 string url = string.Format(
                     LyricsApiUrl,
-                    Uri.EscapeDataString(trackName),
-                    Uri.EscapeDataString(artistName)
+                    Uri.EscapeDataString(normalizedTrack),
+                    Uri.EscapeDataString(normalizedArtist)
                 );
-                string response = await _httpClient.GetStringAsync(url);
+                string response = await GetStringWithRetryAsync(url, 2);
                 var json = JObject.Parse(response);
                 syncedLyrics = json["syncedLyrics"]?.ToString() ?? "";
             }
@@ -291,6 +293,42 @@ namespace ETS2_Spotify_Overlay
                 _cachedLyricsTrackId = trackId;
                 _cachedSyncedLyrics = syncedLyrics;
             }
+        }
+
+        private async Task<string> GetStringWithRetryAsync(string url, int attempts)
+        {
+            Exception lastError = null;
+            for (int i = 0; i < attempts; i++)
+            {
+                try
+                {
+                    return await _httpClient.GetStringAsync(url);
+                }
+                catch (Exception ex)
+                {
+                    lastError = ex;
+                    if (i < attempts - 1)
+                    {
+                        await Task.Delay(300);
+                    }
+                }
+            }
+
+            throw lastError ?? new Exception("Failed to fetch lyrics.");
+        }
+
+        private string NormalizeForLyricsLookup(string text)
+        {
+            if (string.IsNullOrWhiteSpace(text))
+                return "";
+
+            string normalized = text;
+            int bracketIndex = normalized.IndexOf('(');
+            if (bracketIndex > 0)
+            {
+                normalized = normalized.Substring(0, bracketIndex);
+            }
+            return normalized.Trim();
         }
 
         private void OnStatusChanged(string status)

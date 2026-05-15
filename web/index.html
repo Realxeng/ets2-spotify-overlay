@@ -387,7 +387,11 @@
             }
 
             const currentLyricLine = getCurrentLyricLine(progressMs);
-            lyricsLineEl.textContent = currentLyricLine || 'No synced lyrics available';
+            if (!parsedLyrics.length) {
+                lyricsLineEl.textContent = 'No synced lyrics available';
+            } else {
+                lyricsLineEl.textContent = currentLyricLine || '♪';
+            }
 
             // Update play/pause button
             if (data.isPlaying) {
